@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Hosting Panel</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body { background:#0f172a; color:white; font-family:sans-serif; }
+.card { background:#1e293b; padding:15px; margin:10px; border-radius:10px; }
+button { background:#22c55e; padding:8px; border:none; color:white; margin:5px; }
+</style>
+</head>
+
+<body>
+
+<h1>🚀 Hosting Panel</h1>
+
+<div class="card">
+<input id="user" placeholder="User">
+<input id="pass" type="password">
+<button onclick="register()">Register</button>
+<button onclick="login()">Login</button>
+</div>
+
+<div class="card">
+<select id="game">
+<option value="minecraft">Minecraft</option>
+<option value="rust">Rust</option>
+<option value="valheim">Valheim</option>
+</select>
+<button onclick="create()">Start</button>
+</div>
+
+<div class="card">
+<button onclick="load()">Server laden</button>
+<div id="servers"></div>
+</div>
+
+<script>
+function register(){
+ fetch('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({username:user.value,password:pass.value})})
+}
+
+function login(){
+ fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({username:user.value,password:pass.value})})
+}
+
+function create(){
+ fetch('/api/server/create',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({game:game.value})})
+ .then(r=>r.text()).then(alert)
+}
+
+function load(){
+ fetch('/api/server/list')
+ .then(r=>r.json())
+ .then(data=>{
+  servers.innerHTML="";
+  data.forEach(s=>{
+    servers.innerHTML += `<div>${s.game} - ${s.port}</div>`;
+  });
+ })
+}
+</script>
+
+</body>
+</html>
