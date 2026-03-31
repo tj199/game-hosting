@@ -57,9 +57,12 @@ let setupDone = db.prepare("SELECT * FROM users LIMIT 1").get() ? true : false;
 
 app.post('/api/setup', async (req,res)=>{
  if(setupDone) return res.send("Schon gemacht");
+
  const hash = await bcrypt.hash(req.body.password,10);
+
  db.prepare("INSERT INTO users (username,password,role,active)")
  .run(req.body.username,hash,"admin",1);
+
  setupDone = true;
  res.send("Setup OK");
 });
@@ -71,8 +74,10 @@ app.get('/api/setup',(req,res)=>{
 // REGISTER
 app.post('/api/auth/register', async (req,res)=>{
  const hash = await bcrypt.hash(req.body.password,10);
+
  db.prepare("INSERT INTO users (username,password,active)")
  .run(req.body.username,hash,0);
+
  res.send("⏳ Wartet auf Freischaltung");
 });
 
@@ -86,33 +91,45 @@ app.post('/api/auth/login',(req,res)=>{
 
  bcrypt.compare(req.body.password,user.password).then(ok=>{
   if(!ok) return res.send("Passwort falsch");
+
   req.session.user=user;
   res.send("Login OK");
  });
 });
 
-// ADMIN USER
+// USER CHECK
+app.get('/api/auth/me',(req,res)=>{
+ res.json(req.session.user || null);
+});
+
+// LOGOUT
+app.get('/api/auth/logout',(req,res)=>{
+ req.session.destroy();
+ res.send("Logout");
+});
+
+// ADMIN USERS
 app.get('/api/admin/users',(req,res)=>{
  res.json(db.prepare("SELECT * FROM users").all());
 });
 
 app.post('/api/admin/approve',(req,res)=>{
  db.prepare("UPDATE users SET active=1 WHERE id=?").run(req.body.id);
- res.send("OK");
+ res.send("Freigeschaltet");
 });
 
 app.post('/api/admin/block',(req,res)=>{
  db.prepare("UPDATE users SET active=0 WHERE id=?").run(req.body.id);
- res.send("OK");
+ res.send("Gesperrt");
 });
 
 app.post('/api/admin/role',(req,res)=>{
  db.prepare("UPDATE users SET role=? WHERE id=?")
  .run(req.body.role,req.body.id);
- res.send("OK");
+ res.send("Rolle gesetzt");
 });
 
-// GAME
+// GAMES
 app.post('/api/admin/game',(req,res)=>{
  db.prepare("INSERT INTO games (name,image,docker,port)")
  .run(req.body.name,req.body.image,req.body.docker,req.body.port);
@@ -144,6 +161,7 @@ app.post('/api/server/create',(req,res)=>{
  res.send("Server erstellt");
 });
 
+// SERVER LIST
 app.get('/api/server/list',(req,res)=>{
  if(!req.session.user) return res.json([]);
 
@@ -159,6 +177,46 @@ app.get('/api/server/list',(req,res)=>{
  res.json(servers);
 });
 
-// FILE MANAGER + UPLOAD + KONSOLE bleiben gleich...
+// FILE MANAGER
+app.get('/api/files/:id',(req,res)=>{
+ const path = req.query.path || "/";
+ exec(`docker exec ${req.params.id} ls -la ${path}`, (e,out)=>res.send(out));
+});
+
+app.get('/api/file',(req,res)=>{
+ exec(`docker exec ${req.query.id} cat ${req.query.path}`, (e,out)=>res.send(out));
+});
+
+app.post('/api/file/save',(req,res)=>{
+ exec(`docker exec ${req.body.id} sh -c "echo '${req.body.content}' > ${req.body.path}"`);
+ res.send("Gespeichert");
+});
+
+// UPLOAD
+app.post('/api/upload', upload.single('file'), (req,res)=>{
+ exec(`docker cp ${req.file.path} ${req.body.id}:${req.body.path}`);
+ res.send("Upload OK");
+});
+
+// LIVE CONSOLE
+io.on('connection', (socket)=>{
+ socket.on('console', (id)=>{
+  const logs = exec(`docker logs -f ${id}`);
+
+  logs.stdout.on('data', (data)=>{
+    socket.emit('log', data.toString());
+  });
+ });
+});
+
+// STATS
+app.get('/api/system/stats',(req,res)=>{
+ os.cpuUsage(v=>{
+  res.json({
+   cpu:(v*100).toFixed(1),
+   ram:((1-os.freememPercentage())*100).toFixed(1)
+  });
+ });
+});
 
 http.listen(3000,()=>console.log("🔥 TJ Hosting läuft"));
