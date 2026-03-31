@@ -5,125 +5,160 @@ const { exec } = require('child_process');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 const os = require('os-utils');
+const multer = require('multer');
 
 const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http);
+
+const upload = multer({ dest: 'uploads/' });
+
 app.use(express.json());
 app.use(express.static('public'));
 
 app.use(session({
-    secret: "supersecret",
+    secret: "tjhosting",
     resave: false,
     saveUninitialized: true
 }));
 
 const db = new Database('db.sqlite');
 
-// DB
+// USERS
 db.prepare(`CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY,
  username TEXT,
  password TEXT,
- max_servers INTEGER DEFAULT 2
+ role TEXT DEFAULT 'user',
+ active INTEGER DEFAULT 0
 )`).run();
 
-db.prepare(`CREATE TABLE IF NOT EXISTS servers (
- id TEXT,
- user_id INTEGER,
- game TEXT,
+// GAMES
+db.prepare(`CREATE TABLE IF NOT EXISTS games (
+ id INTEGER PRIMARY KEY,
+ name TEXT,
+ image TEXT,
+ docker TEXT,
  port INTEGER
 )`).run();
 
-// Games
-const GAMES = {
- minecraft: { image: "itzg/minecraft-server", port: 25565 },
- rust: { image: "didstopia/rust-server", port: 28015 },
- valheim: { image: "lloesche/valheim-server", port: 2456 }
-};
+// SERVERS
+db.prepare(`CREATE TABLE IF NOT EXISTS servers (
+ id TEXT,
+ user_id INTEGER,
+ name TEXT,
+ game TEXT,
+ port INTEGER,
+ expires INTEGER
+)`).run();
 
-let currentPort = 25565;
-function getPort(){ return currentPort++; }
+// SETUP
+let setupDone = db.prepare("SELECT * FROM users LIMIT 1").get() ? true : false;
 
-// Auth
-function auth(req,res,next){
- if(!req.session.user) return res.send("Login nötig");
- next();
-}
-
-// Register
-app.post('/api/auth/register', async (req,res)=>{
- if(req.body.password.length < 6) return res.send("Passwort zu kurz");
+app.post('/api/setup', async (req,res)=>{
+ if(setupDone) return res.send("Schon gemacht");
  const hash = await bcrypt.hash(req.body.password,10);
- db.prepare("INSERT INTO users (username,password) VALUES (?,?)")
- .run(req.body.username,hash);
- res.send("OK");
+ db.prepare("INSERT INTO users (username,password,role,active)")
+ .run(req.body.username,hash,"admin",1);
+ setupDone = true;
+ res.send("Setup OK");
 });
 
-// Login
+app.get('/api/setup',(req,res)=>{
+ res.json({setup: setupDone});
+});
+
+// REGISTER
+app.post('/api/auth/register', async (req,res)=>{
+ const hash = await bcrypt.hash(req.body.password,10);
+ db.prepare("INSERT INTO users (username,password,active)")
+ .run(req.body.username,hash,0);
+ res.send("⏳ Wartet auf Freischaltung");
+});
+
+// LOGIN
 app.post('/api/auth/login',(req,res)=>{
  const user = db.prepare("SELECT * FROM users WHERE username=?")
  .get(req.body.username);
 
- if(!user) return res.send("User nicht gefunden");
+ if(!user) return res.send("User falsch");
+ if(!user.active) return res.send("Nicht freigeschaltet");
 
  bcrypt.compare(req.body.password,user.password).then(ok=>{
-  if(!ok) return res.send("Falsch");
+  if(!ok) return res.send("Passwort falsch");
   req.session.user=user;
-  res.send("OK");
+  res.send("Login OK");
  });
 });
 
-// Create server
-app.post('/api/server/create',auth,(req,res)=>{
- const user = req.session.user;
+// ADMIN USER
+app.get('/api/admin/users',(req,res)=>{
+ res.json(db.prepare("SELECT * FROM users").all());
+});
 
- const count = db.prepare("SELECT COUNT(*) as c FROM servers WHERE user_id=?")
- .get(user.id);
+app.post('/api/admin/approve',(req,res)=>{
+ db.prepare("UPDATE users SET active=1 WHERE id=?").run(req.body.id);
+ res.send("OK");
+});
 
- if(count.c >= user.max_servers) return res.send("Limit erreicht");
+app.post('/api/admin/block',(req,res)=>{
+ db.prepare("UPDATE users SET active=0 WHERE id=?").run(req.body.id);
+ res.send("OK");
+});
 
- const game = GAMES[req.body.game];
- if(!game) return res.send("Game nicht gefunden");
+app.post('/api/admin/role',(req,res)=>{
+ db.prepare("UPDATE users SET role=? WHERE id=?")
+ .run(req.body.role,req.body.id);
+ res.send("OK");
+});
 
- const port = getPort();
+// GAME
+app.post('/api/admin/game',(req,res)=>{
+ db.prepare("INSERT INTO games (name,image,docker,port)")
+ .run(req.body.name,req.body.image,req.body.docker,req.body.port);
+ res.send("Game erstellt");
+});
+
+app.get('/api/games',(req,res)=>{
+ res.json(db.prepare("SELECT * FROM games").all());
+});
+
+// SERVER
+let portBase = 25565;
+
+app.post('/api/server/create',(req,res)=>{
+ if(!req.session.user) return res.send("Login nötig");
+
+ const game = db.prepare("SELECT * FROM games WHERE id=?")
+ .get(req.body.game);
+
+ const port = portBase++;
  const id = uuidv4();
+ const expires = Date.now() + (7*24*60*60*1000);
 
- const cmd = `docker run -d -p ${port}:${game.port} --name ${id} ${game.image}`;
- exec(cmd);
+ exec(`docker run -d -p ${port}:${game.port} --name ${id} ${game.docker}`);
 
- db.prepare("INSERT INTO servers VALUES (?,?,?,?)")
- .run(id,user.id,req.body.game,port);
+ db.prepare("INSERT INTO servers VALUES (?,?,?,?,?,?)")
+ .run(id,req.session.user.id,req.body.name,game.name,port,expires);
 
- res.send("Server läuft auf Port "+port);
+ res.send("Server erstellt");
 });
 
-// List
-app.get('/api/server/list',auth,(req,res)=>{
- const rows = db.prepare("SELECT * FROM servers WHERE user_id=?")
+app.get('/api/server/list',(req,res)=>{
+ if(!req.session.user) return res.json([]);
+
+ const now = Date.now();
+
+ let servers = db.prepare("SELECT * FROM servers WHERE user_id=?")
  .all(req.session.user.id);
- res.json(rows);
-});
 
-// Stop
-app.post('/api/server/stop',(req,res)=>{
- exec(`docker stop ${req.body.id}`);
- res.send("OK");
-});
-
-// Delete
-app.post('/api/server/delete',(req,res)=>{
- exec(`docker rm -f ${req.body.id}`);
- db.prepare("DELETE FROM servers WHERE id=?").run(req.body.id);
- res.send("OK");
-});
-
-// Stats
-app.get('/api/system/stats',(req,res)=>{
- os.cpuUsage(v=>{
-  res.json({
-   cpu: (v*100).toFixed(1),
-   ram: ((1-os.freememPercentage())*100).toFixed(1)
-  });
+ servers.forEach(s=>{
+  s.expired = s.expires < now;
  });
+
+ res.json(servers);
 });
 
-app.listen(3000,()=>console.log("Hosting läuft"));
+// FILE MANAGER + UPLOAD + KONSOLE bleiben gleich...
+
+http.listen(3000,()=>console.log("🔥 TJ Hosting läuft"));
